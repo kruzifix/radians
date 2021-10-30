@@ -39,8 +39,8 @@ typedef enum
 {
     CMODE_NORMAL = 0,
     CMODE_VARIGATE,
-    CMODE_QUANTIZER_OUTPUT,
-    CMODE_COUNT
+    CMODE_VARIGATE_SET_PROB,
+    CMODE_QUANTIZER_OUTPUT
 } control_mode_t;
 
 volatile uint8_t current_mode = CMODE_NORMAL;
@@ -88,7 +88,9 @@ uint16_t note_scales[QUANTIZER_SCALES] = {
 
 volatile uint8_t current_leds;
 volatile uint8_t next_leds;
+
 volatile uint8_t led_override_time;
+volatile uint8_t flash_leds;
 
 void LEDS(uint8_t value)
 {
@@ -103,6 +105,14 @@ void OVERRIDE_LEDS(uint8_t value, uint8_t time)
 {
     led_override_time = time;
     next_leds = value;
+    flash_leds = 0;
+}
+
+void FLASH_LEDS(uint8_t value, uint8_t time)
+{
+    led_override_time = time;
+    next_leds = value;
+    flash_leds = value;
 }
 
 uint8_t get_enabled_note(uint8_t note)
@@ -113,6 +123,26 @@ uint8_t get_enabled_note(uint8_t note)
     }
 
     return note;
+}
+
+uint8_t get_bar_value(uint8_t value)
+{
+    uint8_t bit_count = value >> 5;
+    if (value > 15)
+    {
+        bit_count += 1;
+    }
+
+    uint8_t led_value = 0x00;
+    for (uint8_t i = 0; i <= 7; ++i)
+    {
+        if (i < bit_count)
+        {
+            led_value |= 1 << (7 - i);
+        }
+    }
+
+    return led_value;
 }
 
 void setup_timer()
@@ -151,6 +181,7 @@ int main(void)
     current_leds = 0;
     next_leds = 0;
     led_override_time = 0;
+    flash_leds = 0;
 
     setup_spi();
     setup_adc();
@@ -296,39 +327,48 @@ ISR(TIMER2_OVF_vect)
     static button_t clear_btn;
     static button_t quant_btn;
 
-    static uint8_t vg_step_index = 0;
-    static uint16_t vg_index_time = 0;
-    static uint8_t vg_last_prob = 0;
-    static uint8_t vg_edit_prob = 0;
+    static uint8_t vg_editing_index = 0;
 
     if (SW_DOWN(SW_RAND_MODE))
     {
         rand_btn.pressed = rand_btn.pressed == 0xFFFF ? 0xFFFF : rand_btn.pressed + 1;
 
-        // held 1 second
-        if (rand_btn.pressed == 60)
+        // held 1.5 seconds
+        if (rand_btn.pressed == 90)
         {
             if (current_mode == CMODE_VARIGATE)
             {
                 current_mode = CMODE_NORMAL;
             }
-            else
+            else if (current_mode == CMODE_NORMAL)
             {
                 current_mode = CMODE_VARIGATE;
             }
             change_cv_edit = 0;
-            // TODO: flash leds!
-            LEDS(0x00);
+
+            FLASH_LEDS(current_mode == CMODE_VARIGATE ? 0x0F : 0xF0, 60);
         }
     }
     else
     {
         if (rand_btn.pressed > 0 && rand_btn.pressed < 30)
         {
-            if (current_mode == CMODE_NORMAL)
+            switch (current_mode)
             {
+            case CMODE_NORMAL:
                 current_random_mode = (current_random_mode + 1) % RMODE_COUNT;
-                OVERRIDE_LEDS(1 << (7 - current_random_mode), 60);
+                FLASH_LEDS(1 << (7 - current_random_mode), 60);
+                break;
+            case CMODE_VARIGATE:
+                current_mode = CMODE_VARIGATE_SET_PROB;
+                vg_editing_index = get_adc_steps_index();
+                break;
+            case CMODE_VARIGATE_SET_PROB:
+                current_mode = CMODE_VARIGATE;
+                gate_probability[vg_editing_index] = get_adc_change_cv() >> 2;
+                break;
+            default:
+                break;
             }
         }
 
@@ -346,15 +386,10 @@ ISR(TIMER2_OVF_vect)
             switch (current_mode)
             {
             case CMODE_VARIGATE:
-                for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
-                {
-                    gate_probability[i] = 0xFF; // 100%!
-                }
-                vg_last_prob = get_adc_change_cv() >> 2;
-                vg_step_index = 0xFF;
-                vg_index_time = 0;
-                vg_edit_prob = 0;
-                LEDS(0x00);
+                gate_probability[get_adc_steps_index()] = 0xFF;
+                break;
+            case CMODE_VARIGATE_SET_PROB:
+                current_mode = CMODE_VARIGATE;
                 break;
             default:
                 break;
@@ -388,51 +423,39 @@ ISR(TIMER2_OVF_vect)
         if (quant_btn.pressed > 0 && quant_btn.pressed < 30)
         {
             current_scale = (current_scale + 1) % QUANTIZER_SCALES;
-            OVERRIDE_LEDS(1 << (7 - current_scale), 60);
+            FLASH_LEDS(1 << (7 - current_scale), 60);
         }
 
         quant_btn.pressed = 0;
     }
 
-    // varigate input
     if (current_mode == CMODE_VARIGATE)
     {
-        uint8_t current_step = get_adc_steps_index();
+        uint8_t selected_step = get_adc_steps_index();
 
-        if (current_step == vg_step_index)
-        {
-            vg_index_time = vg_index_time == 0xFF ? 0xFF : vg_index_time + 1;
-        }
-        else
-        {
-            vg_last_prob = get_adc_change_cv() >> 2;
-            vg_step_index = current_step;
-            vg_index_time = 0;
-            vg_edit_prob = 0;
-            LEDS(0x00);
-        }
-
-        if (vg_index_time > 12)
-        {
-            LEDS(1 << (7 - vg_step_index));
-
-            uint8_t prob = get_adc_change_cv() >> 2;
-
-            if (vg_edit_prob)
-            {
-                gate_probability[vg_step_index] = prob;
-                LEDS(prob <= THRESHOLD_FOR_CHANGE ? 0x00 : prob);
-            }
-            else if (abs(prob - vg_last_prob) > 30)
-            {
-                vg_edit_prob = 1;
-            }
-        }
+        LEDS(get_bar_value(gate_probability[selected_step]));
+    }
+    else if (current_mode == CMODE_VARIGATE_SET_PROB)
+    {
+        LEDS(get_bar_value(get_adc_change_cv() >> 2));
     }
 
     if (led_override_time > 0)
     {
         led_override_time--;
+
+        if (flash_leds != 0)
+        {
+            if ((led_override_time % 12) == 0)
+            {
+                next_leds = 0;
+            }
+            else if ((led_override_time % 12) == 6)
+            {
+                next_leds = flash_leds;
+            }
+        }
+
         if (led_override_time == 0)
         {
             next_leds = 0x00;
