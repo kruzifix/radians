@@ -46,7 +46,7 @@ uint16_t get_adc_quant(void)
 
 uint8_t get_adc_steps_index(void)
 {
-    // when switching adc input jumps to 5 volt between steps!!
+    // TODO: when switching adc input jumps to 5 volt between steps!!
     // mask too high adc value, or only step to other value when enough values after another were same
     uint8_t index = adc_values[ADC_LOOP_LENGTH_IN] >> 7;
     return index & 0x07;

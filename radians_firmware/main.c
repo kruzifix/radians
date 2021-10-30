@@ -45,6 +45,7 @@ typedef enum
 
 volatile uint8_t current_mode = CMODE_NORMAL;
 
+
 // random looping sequence
 #define MAX_STEPS 16
 #define THRESHOLD_FOR_CHANGE 0x0F
@@ -53,9 +54,7 @@ static const uint8_t loop_lengths[8] = { 2, 3, 4, 5, 6, 8, 12, 16 };
 
 uint8_t steps[MAX_STEPS];
 uint8_t step_index;
-uint8_t step_length;
-uint8_t step_change_cv;
-uint8_t change_cv_edit;
+uint8_t enabled_normal_mode_editing;
 
 uint16_t shift_value;
 
@@ -165,10 +164,8 @@ int main(void)
     {
         steps[i] = 0;
     }
-    step_index = 0;
-    step_length = loop_lengths[get_adc_steps_index()];
-    step_change_cv = get_adc_change_cv() >> 2;
-    change_cv_edit = 0;
+
+    enabled_normal_mode_editing = 1;
     shift_value = 0;
 
     for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
@@ -191,7 +188,10 @@ int main(void)
 
     LEDS_ON;
 
-    uint8_t last_clk = 0x00;
+    uint8_t last_clk = 0;
+    uint8_t current_loop_length = loop_lengths[0];
+    uint8_t current_change_cv = 0;
+    uint8_t current_step_index = 0;
 
     while (1)
     {
@@ -207,53 +207,52 @@ int main(void)
         {
             if (current_mode == CMODE_NORMAL)
             {
-                step_length = loop_lengths[get_adc_steps_index()];
-
                 uint8_t change_cv = get_adc_change_cv() >> 2;
+                uint8_t loop_length = loop_lengths[get_adc_steps_index()];
 
-                if (change_cv < THRESHOLD_FOR_CHANGE)
+                if (enabled_normal_mode_editing)
                 {
-                    change_cv_edit = 1;
+                    current_change_cv = change_cv;
+                    current_loop_length = loop_length;
                 }
-
-                if (change_cv_edit)
+                else
                 {
-                    step_change_cv = change_cv;
+                    if (change_cv < THRESHOLD_FOR_CHANGE &&
+                    loop_length == current_loop_length)
+                    {
+                        enabled_normal_mode_editing = 1;
+                    }
                 }
             }
 
-            step_index = (step_index + 1) % step_length;
+            current_step_index = (current_step_index + 1) % current_loop_length;
 
             // decide if new random value!
             // if under threshold, no change at all!
-            uint8_t apply_change = step_change_cv > THRESHOLD_FOR_CHANGE &&
-                (uint8_t)((rand_lcg() >> 7) & 0xFF) < step_change_cv;
+            uint8_t apply_change = current_change_cv > THRESHOLD_FOR_CHANGE &&
+                (uint8_t)((rand_lcg() >> 7) & 0xFF) < current_change_cv;
 
+            uint8_t current_random_bits = 0;
             switch (current_random_mode)
             {
             case RMODE_TOTAL_RANDOMNESS:
             {
                 if (apply_change)
                 {
-                    steps[step_index] = rand_lcg() & 0xFF;
+                    steps[current_step_index] = rand_lcg() & 0xFF;
                 }
 
                 if (SW_DOWN(SW_CLEAR))
                 {
-                    steps[step_index] = 0x00;
+                    steps[current_step_index] = 0x00;
                 }
 
-                uint8_t bits = steps[step_index];
-                set_dac_rand(bits);
-                if (current_mode == CMODE_NORMAL)
-                {
-                    LEDS(bits);
-                }
+                current_random_bits = steps[current_step_index];
                 break;
             }
             case RMODE_SHIFT:
             {
-                uint8_t new_value_index = 15 - (step_length - 1);
+                uint8_t new_value_index = 15 - (current_loop_length - 1);
                 uint8_t new_value = (shift_value >> new_value_index) & 0x01;
 
                 if (apply_change)
@@ -267,13 +266,7 @@ int main(void)
                 }
 
                 shift_value = (shift_value >> 1) | (new_value << 15);
-
-                uint8_t bits =  shift_value & 0xFF;
-                set_dac_rand(bits);
-                if (current_mode == CMODE_NORMAL)
-                {
-                    LEDS(bits);
-                }
+                current_random_bits =  shift_value & 0xFF;
                 break;
             }
             default:
@@ -282,9 +275,15 @@ int main(void)
                 break;
             }
 
+            set_dac_rand(current_random_bits);
+            if (current_mode == CMODE_NORMAL && enabled_normal_mode_editing)
+            {
+                LEDS(current_random_bits);
+            }
+
             // varigate!
             {
-                uint8_t prob = gate_probability[step_index % MAX_VARIGATE_STEPS];
+                uint8_t prob = gate_probability[current_step_index % MAX_VARIGATE_STEPS];
 
                 // output gate?
                 if (prob > THRESHOLD_FOR_CHANGE && (rand_lcg() >> 8) < prob)
@@ -329,6 +328,10 @@ ISR(TIMER2_OVF_vect)
 
     static uint8_t vg_editing_index = 0;
 
+    static uint8_t time_counter = 0;
+
+    ++time_counter;
+
     if (SW_DOWN(SW_RAND_MODE))
     {
         rand_btn.pressed = rand_btn.pressed == 0xFFFF ? 0xFFFF : rand_btn.pressed + 1;
@@ -343,8 +346,8 @@ ISR(TIMER2_OVF_vect)
             else if (current_mode == CMODE_NORMAL)
             {
                 current_mode = CMODE_VARIGATE;
+                enabled_normal_mode_editing = 0;
             }
-            change_cv_edit = 0;
 
             FLASH_LEDS(current_mode == CMODE_VARIGATE ? 0x0F : 0xF0, 60);
         }
@@ -437,7 +440,27 @@ ISR(TIMER2_OVF_vect)
     }
     else if (current_mode == CMODE_VARIGATE_SET_PROB)
     {
-        LEDS(get_bar_value(get_adc_change_cv() >> 2));
+        if ((time_counter % 12) == 0)
+        {
+            LEDS(get_bar_value(get_adc_change_cv() >> 2));
+        }
+        else if ((time_counter % 12) == 6)
+        {
+            next_leds = 0x00;
+        }
+    }
+    else if (current_mode == CMODE_NORMAL &&
+        !enabled_normal_mode_editing &&
+        led_override_time == 0)
+    {
+        if ((time_counter % 12) == 0)
+        {
+            next_leds = 0xC3;
+        }
+        else if ((time_counter % 12) == 6)
+        {
+            next_leds = 0x00;
+        }
     }
 
     if (led_override_time > 0)
