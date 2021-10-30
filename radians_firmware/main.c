@@ -38,7 +38,8 @@ typedef struct {
 typedef enum
 {
     CMODE_NORMAL,
-    CMODE_VARIGATE
+    CMODE_VARIGATE,
+    CMODE_QUANTIZER_OUTPUT,
 } control_mode_t;
 
 control_mode_t current_mode = CMODE_NORMAL;
@@ -82,7 +83,10 @@ volatile uint8_t leds_after_override;
 uint8_t get_enabled_note(uint8_t note)
 {
     while (note > 0 && !(note_scales[current_scale] & (1 << (note % 12))))
-    note--;
+    {
+        note--;
+    }
+
     return note;
 }
 
@@ -144,7 +148,9 @@ int main(void)
                 uint8_t change_cv = get_adc_change_cv() >> 2;
 
                 if (change_cv < THRESHOLD_FOR_CHANGE)
-                change_cv_edit = 1;
+                {
+                    change_cv_edit = 1;
+                }
 
                 if (change_cv_edit)
                 {
@@ -170,7 +176,9 @@ int main(void)
 
                 // output gate?
                 if (prob > THRESHOLD_FOR_CHANGE && (rand_lcg() >> 8) < prob)
-                CLK_OUT_HIGH;
+                {
+                    CLK_OUT_HIGH;
+                }
             }
 
             uint8_t bits = steps[step_index];
@@ -195,6 +203,11 @@ int main(void)
 
             // quantize!
             uint8_t note = get_enabled_note(quant_input / 5);
+
+            if (current_mode == CMODE_QUANTIZER_OUTPUT)
+            {
+                LEDS(note);
+            }
 
             // output!
             set_dac_quant(note * 5);
@@ -244,14 +257,14 @@ ISR(TIMER2_OVF_vect)
         {
             switch (current_mode)
             {
-                case CMODE_NORMAL:
+            case CMODE_NORMAL:
                 for (uint8_t i = 0; i < MAX_STEPS; i++)
                 {
                     steps[i] = 0;
                 }
                 change_cv_edit = 0;
                 break;
-                case CMODE_VARIGATE:
+            case CMODE_VARIGATE:
                 for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
                 {
                     gate_probability[i] = 0xFF; // 100%!
@@ -260,6 +273,8 @@ ISR(TIMER2_OVF_vect)
                 vg_step_index = 0xFF;
                 vg_index_time = 0;
                 vg_edit_prob = 0;
+                break;
+            default:
                 break;
             }
             LEDS(0x00);
@@ -271,6 +286,21 @@ ISR(TIMER2_OVF_vect)
     if (SW_DOWN(SW_QUANT_MODE))
     {
         quant_btn.pressed = quant_btn.pressed == 0xFFFF ? 0xFFFF : quant_btn.pressed + 1;
+
+        // held 1 second
+        if (quant_btn.pressed == 60)
+        {
+            if (current_mode == CMODE_QUANTIZER_OUTPUT)
+            {
+                current_mode = CMODE_NORMAL;
+            }
+            else
+            {
+                current_mode = CMODE_QUANTIZER_OUTPUT;
+            }
+
+            LEDS(0x00);
+        }
     }
     else
     {
