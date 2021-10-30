@@ -37,12 +37,13 @@ typedef struct {
 // control mode
 typedef enum
 {
-    CMODE_NORMAL,
+    CMODE_NORMAL = 0,
     CMODE_VARIGATE,
     CMODE_QUANTIZER_OUTPUT,
+    CMODE_COUNT
 } control_mode_t;
 
-control_mode_t current_mode = CMODE_NORMAL;
+uint8_t current_mode = CMODE_NORMAL;
 
 // random looping sequence
 #define MAX_STEPS 16
@@ -55,6 +56,17 @@ uint8_t step_index;
 uint8_t step_length;
 uint8_t step_change_cv;
 uint8_t change_cv_edit;
+
+uint16_t shift_value;
+
+typedef enum 
+{
+    RMODE_TOTAL_RANDOMNESS = 0,
+    RMODE_SHIFT,
+    RMODE_COUNT
+} random_mode_t;
+
+uint8_t current_random_mode = RMODE_TOTAL_RANDOMNESS;
 
 // varigate
 #define MAX_VARIGATE_STEPS 8
@@ -114,6 +126,7 @@ int main(void)
     step_length = loop_lengths[get_adc_steps_index()];
     step_change_cv = get_adc_change_cv() >> 2;
     change_cv_edit = 0;
+    shift_value = 0;
 
     for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
     {
@@ -162,12 +175,47 @@ int main(void)
 
             // decide if new random value!
             // if under threshold, no change at all!
-            if (step_change_cv > THRESHOLD_FOR_CHANGE)
+            uint8_t apply_change = step_change_cv > THRESHOLD_FOR_CHANGE &&
+                (rand_lcg() >> 7) < step_change_cv;
+
+            switch (current_random_mode)
             {
-                if ((rand_lcg() >> 7) < step_change_cv)
+            case RMODE_TOTAL_RANDOMNESS:
+            {
+                if (apply_change)
                 {
                     steps[step_index] = rand_lcg() & 0xFF;
                 }
+
+                uint8_t bits = steps[step_index];
+                set_dac_rand(bits);
+                if (current_mode == CMODE_NORMAL)
+                {
+                    LEDS(bits);
+                }
+                break;
+            }
+            case RMODE_SHIFT:
+            {
+                shift_value = (shift_value >> 1) | ((shift_value & 0x01) << step_length);
+
+                if (apply_change)
+                {
+                    shift_value ^= 1 << step_length;
+                }
+
+                uint8_t bits =  shift_value & 0xFF;
+                set_dac_rand(bits);
+                if (current_mode == CMODE_NORMAL)
+                {
+                    LEDS(bits);
+                }
+                break;
+            }
+            default:
+                // wtf?! should not happen!
+                current_random_mode = RMODE_TOTAL_RANDOMNESS;
+                break;
             }
 
             // varigate!
@@ -180,17 +228,9 @@ int main(void)
                     CLK_OUT_HIGH;
                 }
             }
-
-            uint8_t bits = steps[step_index];
-            set_dac_rand(bits);
-            if (current_mode == CMODE_NORMAL)
-            {
-                LEDS(bits);
-            }
         }
-
         // falling edge
-        if (last_clk && !clk)
+        else if (last_clk && !clk)
         {
             CLK_OUT_LOW;
         }
@@ -212,8 +252,6 @@ int main(void)
             // output!
             set_dac_quant(note * 5);
         }
-
-        _delay_ms(1);
     }
 }
 
@@ -237,13 +275,27 @@ ISR(TIMER2_OVF_vect)
         // held 1 second
         if (rand_btn.pressed == 60)
         {
-            current_mode = current_mode == CMODE_NORMAL ? CMODE_VARIGATE : CMODE_NORMAL;
+            if (current_mode == CMODE_VARIGATE)
+            {
+                current_mode = CMODE_NORMAL;
+            }
+            else
+            {
+                current_mode = CMODE_VARIGATE;
+            }
             change_cv_edit = 0;
+            // TODO: flash leds!
             LEDS(0x00);
         }
     }
     else
     {
+        if (rand_btn.pressed > 0 && rand_btn.pressed < 30)
+        {
+            current_random_mode = (current_random_mode + 1) % RMODE_COUNT;
+            OVERRIDE_LEDS(1 << (7 - current_random_mode), 60);
+        }
+
         rand_btn.pressed = 0;
     }
 
@@ -263,6 +315,7 @@ ISR(TIMER2_OVF_vect)
                     steps[i] = 0;
                 }
                 change_cv_edit = 0;
+                shift_value = 0;
                 break;
             case CMODE_VARIGATE:
                 for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
