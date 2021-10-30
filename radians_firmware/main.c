@@ -43,7 +43,7 @@ typedef enum
     CMODE_COUNT
 } control_mode_t;
 
-uint8_t current_mode = CMODE_NORMAL;
+volatile uint8_t current_mode = CMODE_NORMAL;
 
 // random looping sequence
 #define MAX_STEPS 16
@@ -66,7 +66,7 @@ typedef enum
     RMODE_COUNT
 } random_mode_t;
 
-uint8_t current_random_mode = RMODE_TOTAL_RANDOMNESS;
+volatile uint8_t current_random_mode = RMODE_TOTAL_RANDOMNESS;
 
 // varigate
 #define MAX_VARIGATE_STEPS 8
@@ -86,11 +86,24 @@ uint16_t note_scales[QUANTIZER_SCALES] = {
     0b011010110101, // Mixolydian mode t-t-s-t-t-s-t
 };
 
+volatile uint8_t current_leds;
+volatile uint8_t next_leds;
 volatile uint8_t led_override_time;
-volatile uint8_t leds_after_override;
 
-#define LEDS(val) { if (led_override_time > 0) leds_after_override = val; else set_leds(val); }
-#define OVERRIDE_LEDS(val, t) { led_override_time = t; set_leds(val); }
+void LEDS(uint8_t value)
+{
+    if (led_override_time == 0)
+    {
+        next_leds = value;
+    }
+}
+
+// time unit is ticks (1/60 s)
+void OVERRIDE_LEDS(uint8_t value, uint8_t time)
+{
+    led_override_time = time;
+    next_leds = value;
+}
 
 uint8_t get_enabled_note(uint8_t note)
 {
@@ -135,8 +148,9 @@ int main(void)
 
     current_scale = 0;
 
+    current_leds = 0;
+    next_leds = 0;
     led_override_time = 0;
-    leds_after_override = 0x00;
 
     setup_spi();
     setup_adc();
@@ -150,6 +164,12 @@ int main(void)
 
     while (1)
     {
+        if (next_leds != current_leds)
+        {
+            set_leds(next_leds);
+            current_leds = next_leds;
+        }
+
         uint8_t clk = CLK_IN_ACTIVE;
         // rising edge
         if (!last_clk && clk)
@@ -176,7 +196,7 @@ int main(void)
             // decide if new random value!
             // if under threshold, no change at all!
             uint8_t apply_change = step_change_cv > THRESHOLD_FOR_CHANGE &&
-                (rand_lcg() >> 7) < step_change_cv;
+                (uint8_t)((rand_lcg() >> 7) & 0xFF) < step_change_cv;
 
             switch (current_random_mode)
             {
@@ -197,12 +217,15 @@ int main(void)
             }
             case RMODE_SHIFT:
             {
-                shift_value = (shift_value >> 1) | ((shift_value & 0x01) << step_length);
+                uint8_t new_value_index = 15 - (step_length - 1);
+                uint8_t new_value = (shift_value >> new_value_index) & 0x01;
 
                 if (apply_change)
                 {
-                    shift_value ^= 1 << step_length;
+                    new_value ^= 0x01;
                 }
+
+                shift_value = (shift_value >> 1) | (new_value << 15);
 
                 uint8_t bits =  shift_value & 0xFF;
                 set_dac_rand(bits);
@@ -292,8 +315,11 @@ ISR(TIMER2_OVF_vect)
     {
         if (rand_btn.pressed > 0 && rand_btn.pressed < 30)
         {
-            current_random_mode = (current_random_mode + 1) % RMODE_COUNT;
-            OVERRIDE_LEDS(1 << (7 - current_random_mode), 60);
+            if (current_mode == CMODE_NORMAL)
+            {
+                current_random_mode = (current_random_mode + 1) % RMODE_COUNT;
+                OVERRIDE_LEDS(1 << (7 - current_random_mode), 60);
+            }
         }
 
         rand_btn.pressed = 0;
@@ -360,7 +386,7 @@ ISR(TIMER2_OVF_vect)
         if (quant_btn.pressed > 0 && quant_btn.pressed < 30)
         {
             current_scale = (current_scale + 1) % QUANTIZER_SCALES;
-            OVERRIDE_LEDS(1 << (7 - current_scale), 40);
+            OVERRIDE_LEDS(1 << (7 - current_scale), 60);
         }
 
         quant_btn.pressed = 0;
@@ -407,8 +433,7 @@ ISR(TIMER2_OVF_vect)
         led_override_time--;
         if (led_override_time == 0)
         {
-            set_leds(leds_after_override);
-            leds_after_override = 0x00;
+            next_leds = 0x00;
         }
     }
 }
