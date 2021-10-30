@@ -207,6 +207,11 @@ int main(void)
                     steps[step_index] = rand_lcg() & 0xFF;
                 }
 
+                if (SW_DOWN(SW_CLEAR))
+                {
+                    steps[step_index] = 0x00;
+                }
+
                 uint8_t bits = steps[step_index];
                 set_dac_rand(bits);
                 if (current_mode == CMODE_NORMAL)
@@ -223,6 +228,11 @@ int main(void)
                 if (apply_change)
                 {
                     new_value ^= 0x01;
+                }
+
+                if (SW_DOWN(SW_CLEAR))
+                {
+                    new_value = 0x00;
                 }
 
                 shift_value = (shift_value >> 1) | (new_value << 15);
@@ -335,14 +345,6 @@ ISR(TIMER2_OVF_vect)
         {
             switch (current_mode)
             {
-            case CMODE_NORMAL:
-                for (uint8_t i = 0; i < MAX_STEPS; i++)
-                {
-                    steps[i] = 0;
-                }
-                change_cv_edit = 0;
-                shift_value = 0;
-                break;
             case CMODE_VARIGATE:
                 for (uint8_t i = 0; i < MAX_VARIGATE_STEPS; i++)
                 {
@@ -352,11 +354,11 @@ ISR(TIMER2_OVF_vect)
                 vg_step_index = 0xFF;
                 vg_index_time = 0;
                 vg_edit_prob = 0;
+                LEDS(0x00);
                 break;
             default:
                 break;
             }
-            LEDS(0x00);
         }
 
         clear_btn.pressed = 0;
